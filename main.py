@@ -1,120 +1,175 @@
 import os
 import time
-import requests
-from supabase import create_client, Client
+import re
+import requests 
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from datetime import datetime, timezone
+from webdriver_manager.chrome import ChromeDriverManager
+from supabase import create_client, Client
 
-# --- 環境變數 ---
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
-
-# --- 初始化 Supabase ---
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# ================= ⚙️ V9.0 最終設定區 =================
+SUPABASE_URL = "https://eovkimfqgoggxbkvkjxg.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVvdmtpbWZxZ29nZ3hia3ZranhnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc3NjI1NzksImV4cCI6MjA4MzMzODU3OX0.akX_HaZQwRh53KJ-ULuc5Syf2ypjhaYOg7DfWhYs8EY"
+MAKE_WEBHOOK_URL = "https://hook.eu1.make.com/iqfx87wola6yp35c3ly7mqvugycxwlfx"
+# =======================================================
 
 def setup_driver():
-    """設定 Chrome Headless"""
+    print("🤖 啟動 GitHub Actions 專用瀏覽器 (Momo + PChome)...")
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
-    return webdriver.Chrome(options=chrome_options)
-
-def parse_momo_price(driver, url):
-    """Momo 爬蟲核心"""
-    try:
-        driver.get(url)
-        time.sleep(3)
-        
-        # 嘗試抓取價格 (支援多種版型)
-        selectors = [".prdPrice .special", "#pKwdPrice", "ul.price li.special span"]
-        price_text = None
-        
-        for selector in selectors:
-            try:
-                el = driver.find_element(By.CSS_SELECTOR, selector)
-                if el and el.text.strip():
-                    price_text = el.text.strip()
-                    break
-            except:
-                continue
-        
-        if not price_text: return None
-        return int("".join(filter(str.isdigit, price_text)))
-    except:
-        return None
-
-def notify_make(item_name, price, target_price, url, msg_type):
-    """發送通知到 Make"""
-    if not MAKE_WEBHOOK_URL: return
-    payload = {
-        "type": msg_type,
-        "product_name": item_name,
-        "current_price": price,
-        "target_price": target_price,
-        "url": url,
-        "timestamp": datetime.now().isoformat()
-    }
-    try:
-        requests.post(MAKE_WEBHOOK_URL, json=payload)
-        print(f"✅ Webhook sent: {msg_type}")
-    except Exception as e:
-        print(f"❌ Webhook failed: {e}")
-
-def main():
-    print("🚀 Second Brain V9.0 Started...")
+    chrome_options.add_argument('--headless') 
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1920,1080') 
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # 1. 讀取新資料表 tracked_items
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    return driver
+
+def extract_price(text):
+    if not text: return 0
+    clean = re.sub(r'[^\d.]', '', text)
+    try: return float(clean)
+    except: return 0
+
+def parse_momo(driver):
     try:
-        data = supabase.table("tracked_items").select("*").eq("is_active", True).execute()
-        items = data.data
+        title = driver.title
+        try:
+            meta_title = driver.find_element("css selector", "meta[property='og:title']")
+            if meta_title: title = meta_title.get_attribute("content")
+        except: pass
+
+        price = 0
+        try:
+            selectors = [
+                ".prdPrice .special", ".prdPrice .price", "#pKwdPrice", 
+                "ul.price li.special span", ".amount", "li.special span"
+            ]
+            for sel in selectors:
+                elems = driver.find_elements("css selector", sel)
+                for el in elems:
+                    p = extract_price(el.text)
+                    if p > 10: 
+                        price = p
+                        break
+                if price > 0: break
+        except: pass
+        return title, int(price)
+    except:
+        return None, 0
+
+def parse_pchome(driver):
+    try:
+        title = driver.title
+        try:
+            elem_title = driver.find_element("css selector", "h1.o-prodName, .prod_name, #ProName")
+            if elem_title: title = elem_title.text
+        except: pass
+
+        price = 0
+        try:
+            selectors = [
+                ".o-prodPrice__price", "#PriceTotal", ".web_price .price", ".price_box .price"
+            ]
+            for sel in selectors:
+                elems = driver.find_elements("css selector", sel)
+                for el in elems:
+                    p = extract_price(el.text)
+                    if p > 10: 
+                        price = p
+                        break
+                if price > 0: break
+        except: pass
+        return title, int(price)
+    except:
+        return None, 0
+
+def send_notification(user_id, message):
+    if "hook" not in MAKE_WEBHOOK_URL: return
+    try:
+        # 這裡是關鍵：對應 Make 的 Webhook 格式
+        requests.post(MAKE_WEBHOOK_URL, json={"message": message, "to": user_id})
+        print(f"   🔔 通知已發送")
+    except: pass
+
+def run_updater():
+    print("🚀 開始執行全自動比價任務 (Momo + PChome)...")
+    
+    try:
+        db = create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception as e:
         print(f"❌ DB Error: {e}")
         return
 
-    if not items:
-        print("📭 No active items found.")
+    try:
+        driver = setup_driver()
+    except Exception as e:
+        print(f"❌ Driver Error: {e}")
         return
+    
+    try:
+        try:
+            all_products = db.table("products").select("*").eq("is_active", True).execute().data
+        except:
+            all_products = []
 
-    driver = setup_driver()
-
-    for item in items:
-        print(f"🔍 Checking: {item['product_name']}")
-        current_price = parse_momo_price(driver, item['product_url'])
-        
-        if current_price:
-            print(f"   💰 Price: {current_price}")
-            
-            # 更新目前價格
-            supabase.table("tracked_items").update({
-                "current_price": current_price,
-                "last_checked_at": datetime.now(timezone.utc).isoformat()
-            }).eq("id", item['id']).execute()
-
-            # 寫入歷史紀錄
-            supabase.table("price_history").insert({
-                "item_id": item['id'],
-                "price": current_price
-            }).execute()
-
-            # 判斷通知
-            last_price = item.get('current_price')
-            target = item.get('target_price', 0) or 0
-            
-            if last_price and current_price < last_price:
-                notify_make(item['product_name'], current_price, target, item['product_url'], "降價通知")
-            elif target > 0 and current_price <= target:
-                notify_make(item['product_name'], current_price, target, item['product_url'], "達標通知")
+        if not all_products:
+            print("📭 資料庫無監控商品")
         else:
-            print("   ⚠️ Failed to parse price")
+            print(f"📋 準備檢查 {len(all_products)} 筆商品...\n")
+            
+            for p in all_products:
+                url = p['original_url']
+                platform_name = "未知"
+                
+                if "momo" in url: platform_name = "Momo"
+                elif "pchome" in url: platform_name = "PChome"
+                else: 
+                    print(f"⚠️ 跳過不支援: {url[:20]}...")
+                    continue
 
-    driver.quit()
-    print("✅ Done")
+                print(f"🔎 [{platform_name}] {p.get('product_name', '未知')[:10]}...", end=" ")
+                
+                try:
+                    driver.get(url)
+                    time.sleep(3) 
+                    
+                    name = "未知"
+                    new_price = 0
+                    
+                    if platform_name == "Momo":
+                        name, new_price = parse_momo(driver)
+                    elif platform_name == "PChome":
+                        name, new_price = parse_pchome(driver)
+                    
+                    if new_price > 0:
+                        print(f"[${new_price}] ✅")
+                        
+                        db.table("products").update({
+                            "current_price": new_price,
+                            "product_name": name,
+                            "original_url": driver.current_url 
+                        }).eq("id", p['id']).execute()
+                        
+                        old_price = p.get('current_price') or 0
+                        target_price = p.get('target_price') or 0
+                        
+                        if (old_price > 0 and new_price < old_price):
+                            msg = f"📉【{platform_name}降價】\n{name}\n\n${old_price} ➡️ ${new_price}\n(省 ${old_price - new_price})"
+                            send_notification(p['user_id'], msg)
+                        elif (old_price != new_price and target_price > 0 and new_price <= target_price):
+                            msg = f"🎯【{platform_name}達標】\n{name}\n\n目前：${new_price}"
+                            send_notification(p['user_id'], msg)
+                    else:
+                        print(f"[抓取失敗] ❌")
+                except Exception as e:
+                    print(f"[Err] ❌")
+    finally:
+        driver.quit()
+        print("\n🏁 任務結束")
 
 if __name__ == "__main__":
-    main()
+    run_updater()
