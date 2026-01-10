@@ -2,9 +2,10 @@ name: Daily Momo Price Check
 
 on:
   schedule:
-    # 每天台灣時間 10:00 AM (UTC 02:00) 執行
+    # 每天 UTC 02:00 (台灣時間 10:00) 執行
     - cron: '0 2 * * *'
-  workflow_dispatch: # 允許手動點擊按鈕執行
+  # 允許手動按按鈕觸發 (方便測試)
+  workflow_dispatch:
 
 jobs:
   build:
@@ -24,13 +25,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install selenium supabase requests
+          pip install -r requirements.txt
 
       - name: Run Crawler
-        # 👇 這裡就是關鍵！必須把 Secrets 傳進去，Python 才讀得到
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
         run: python main.py
