@@ -28,8 +28,8 @@ jobs:
           pip install selenium supabase requests
 
       - name: Run Crawler
+        # 👇 這裡就是關鍵！必須把 Secrets 傳進去，Python 才讀得到
         env:
-          # 這裡就是關鍵！將 GitHub Secrets 注入到環境變數中
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
