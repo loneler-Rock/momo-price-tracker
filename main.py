@@ -12,8 +12,8 @@ from supabase import create_client
 # 系統設定區 (請確認 Key 與 URL 是否正確)
 # ==========================================
 SUPABASE_URL = "https://eovkimfqgoggxbkvkjxg.supabase.co"
-SUPABASE_KEY = "YOUR_SUPABASE_KEY_HERE"  # 請填入您的 Supabase Service Role Key (或 Anon Key)
-MAKE_WEBHOOK_URL = "YOUR_MAKE_WEBHOOK_HERE" # 請填入您的 Make Webhook URL
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVvdmtpbWZxZ29nZ3hia3ZranhnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc3NjI1NzksImV4cCI6MjA4MzMzODU3OX0.akX_HaZQwRh53KJ-ULuc5Syf2ypjhaYOg7DfWhYs8EY"
+MAKE_WEBHOOK_URL = "https://hook.eu1.make.com/iqfx87wola6yp35c3ly7mqvugycxwlfx"
 
 # 通路王 (iChannels) 會員 ID
 ICHANNELS_ID = "af000148084"
