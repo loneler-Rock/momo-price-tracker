@@ -1,175 +1,232 @@
 import os
 import time
-import re
-import requests 
+import requests
+import urllib.parse
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
-from supabase import create_client, Client
+from supabase import create_client
 
-# ================= ⚙️ V9.0 最終設定區 =================
+# ==========================================
+# 系統設定區 (請確認 Key 與 URL 是否正確)
+# ==========================================
 SUPABASE_URL = "https://eovkimfqgoggxbkvkjxg.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVvdmtpbWZxZ29nZ3hia3ZranhnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc3NjI1NzksImV4cCI6MjA4MzMzODU3OX0.akX_HaZQwRh53KJ-ULuc5Syf2ypjhaYOg7DfWhYs8EY"
-MAKE_WEBHOOK_URL = "https://hook.eu1.make.com/iqfx87wola6yp35c3ly7mqvugycxwlfx"
-# =======================================================
+SUPABASE_KEY = "YOUR_SUPABASE_KEY_HERE"  # 請填入您的 Supabase Service Role Key (或 Anon Key)
+MAKE_WEBHOOK_URL = "YOUR_MAKE_WEBHOOK_HERE" # 請填入您的 Make Webhook URL
+
+# 通路王 (iChannels) 會員 ID
+ICHANNELS_ID = "af000148084"
+
+# ==========================================
+# 核心功能函式
+# ==========================================
+
+def get_supabase():
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def setup_driver():
-    print("🤖 啟動 GitHub Actions 專用瀏覽器 (Momo + PChome)...")
     chrome_options = Options()
-    chrome_options.add_argument('--headless') 
+    chrome_options.add_argument('--headless') # 無視窗模式
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--window-size=1920,1080') 
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    # 模擬真實瀏覽器 User-Agent
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
     
     service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    return driver
+    return webdriver.Chrome(service=service, options=chrome_options)
 
-def extract_price(text):
-    if not text: return 0
-    clean = re.sub(r'[^\d.]', '', text)
-    try: return float(clean)
-    except: return 0
+def generate_affiliate_link(original_url):
+    """
+    將原始商品網址轉換為通路王 (iChannels) 分潤連結
+    """
+    if "momoshop.com.tw" in original_url:
+        # 進行 URL 編碼
+        encoded_url = urllib.parse.quote(original_url)
+        # 組合通路王通用導購連結
+        return f"http://www.ichannels.com.tw/bbs.php?member={ICHANNELS_ID}&url={encoded_url}"
+    
+    # 若非 Momo (如 PChome)，目前暫時回傳原網址 (後續可擴充 PChome 聯盟網邏輯)
+    return original_url
 
-def parse_momo(driver):
+def update_price_history(supabase, product_id, price):
+    """
+    1. 寫入價格歷史表
+    2. 判斷是否為歷史新低
+    """
+    # A. 寫入歷史紀錄
     try:
-        title = driver.title
-        try:
-            meta_title = driver.find_element("css selector", "meta[property='og:title']")
-            if meta_title: title = meta_title.get_attribute("content")
-        except: pass
+        supabase.table("price_history").insert({
+            "product_id": product_id,
+            "price": price
+        }).execute()
+    except Exception as e:
+        print(f"寫入歷史價格失敗: {e}")
 
-        price = 0
-        try:
-            selectors = [
-                ".prdPrice .special", ".prdPrice .price", "#pKwdPrice", 
-                "ul.price li.special span", ".amount", "li.special span"
-            ]
-            for sel in selectors:
-                elems = driver.find_elements("css selector", sel)
-                for el in elems:
-                    p = extract_price(el.text)
-                    if p > 10: 
-                        price = p
-                        break
-                if price > 0: break
-        except: pass
-        return title, int(price)
-    except:
-        return None, 0
-
-def parse_pchome(driver):
+    # B. 檢查是否為歷史低價
+    # 先讀取該商品目前的紀錄最低價
     try:
-        title = driver.title
-        try:
-            elem_title = driver.find_element("css selector", "h1.o-prodName, .prod_name, #ProName")
-            if elem_title: title = elem_title.text
-        except: pass
+        data = supabase.table("products").select("lowest_price").eq("id", product_id).execute()
+        current_lowest = data.data[0].get("lowest_price")
+        
+        # 如果沒有舊紀錄，或者 現在價格 < 舊紀錄
+        if current_lowest is None or price < float(current_lowest):
+            # 更新 Products 表的最低價欄位
+            supabase.table("products").update({"lowest_price": price}).eq("id", product_id).execute()
+            return True # 是歷史新低
+    except Exception as e:
+        print(f"檢查歷史低價失敗: {e}")
+        
+    return False # 不是歷史新低
 
-        price = 0
-        try:
-            selectors = [
-                ".o-prodPrice__price", "#PriceTotal", ".web_price .price", ".price_box .price"
-            ]
-            for sel in selectors:
-                elems = driver.find_elements("css selector", sel)
-                for el in elems:
-                    p = extract_price(el.text)
-                    if p > 10: 
-                        price = p
-                        break
-                if price > 0: break
-        except: pass
-        return title, int(price)
-    except:
-        return None, 0
-
-def send_notification(user_id, message):
-    if "hook" not in MAKE_WEBHOOK_URL: return
+def parse_momo(driver, url):
+    driver.get(url)
+    time.sleep(3) # 等待載入
+    
     try:
-        # 這裡是關鍵：對應 Make 的 Webhook 格式
-        requests.post(MAKE_WEBHOOK_URL, json={"message": message, "to": user_id})
-        print(f"   🔔 通知已發送")
-    except: pass
+        title = driver.title.split("-")[0].strip()
+        # 嘗試抓取價格 (針對不同促銷版型)
+        price_text = ""
+        try:
+            # 常見紅色促銷價
+            price_text = driver.find_element("css selector", ".prdPrice").text
+        except:
+            try:
+                # 另一個常見價格 ID
+                price_text = driver.find_element("css selector", "#pKwdPrice").text
+            except:
+                price_text = "0"
+        
+        # 清理價格字串 (移除 $ , 等符號)
+        price = int(re.sub(r"[^\d]", "", price_text))
+        return title, price
+    except Exception as e:
+        print(f"Momo 解析失敗: {e}")
+        return "Unknown Product", 99999999
+
+def parse_pchome(driver, url):
+    driver.get(url)
+    time.sleep(3)
+    
+    try:
+        title = driver.title.split("-")[0].strip()
+        # PChome 24h 價格選擇器
+        price_text = ""
+        try:
+            # 新版頁面
+            price_text = driver.find_element("css selector", ".o-prodPrice__price").text
+        except:
+            try:
+                # 舊版頁面
+                price_text = driver.find_element("css selector", "#PriceTotal").text
+            except:
+                price_text = "0"
+                
+        price = int(re.sub(r"[^\d]", "", price_text))
+        return title, price
+    except Exception as e:
+        print(f"PChome 解析失敗: {e}")
+        return "Unknown Product", 99999999
+
+def send_notification(product_name, price, url, user_id, is_lowest_price):
+    """
+    組合訊息並發送給 Make
+    """
+    # 產生分潤連結
+    affiliate_url = generate_affiliate_link(url)
+    
+    # 訊息標題
+    status_tag = "🔥 歷史新低價！" if is_lowest_price else "📉 降價通知"
+    
+    message = (
+        f"{status_tag}\n"
+        f"商品：{product_name}\n"
+        f"金額：${price:,}\n"
+        f"------------------\n"
+        f"點此購買 (已追蹤)：\n{affiliate_url}"
+    )
+    
+    payload = {
+        "message": message,
+        "to": user_id
+    }
+    
+    try:
+        requests.post(MAKE_WEBHOOK_URL, json=payload)
+        print(f"通知已發送: {product_name}")
+    except Exception as e:
+        print(f"Webhook 發送失敗: {e}")
 
 def run_updater():
-    print("🚀 開始執行全自動比價任務 (Momo + PChome)...")
+    print("啟動比價爬蟲 V10.0 (獲利版)...")
+    supabase = get_supabase()
+    driver = setup_driver()
     
-    try:
-        db = create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception as e:
-        print(f"❌ DB Error: {e}")
-        return
+    # 1. 取得所有啟用中的商品
+    response = supabase.table("products").select("*").eq("is_active", True).execute()
+    products = response.data
+    
+    print(f"共發現 {len(products)} 個監控商品")
 
-    try:
-        driver = setup_driver()
-    except Exception as e:
-        print(f"❌ Driver Error: {e}")
-        return
-    
-    try:
+    for p in products:
         try:
-            all_products = db.table("products").select("*").eq("is_active", True).execute().data
-        except:
-            all_products = []
-
-        if not all_products:
-            print("📭 資料庫無監控商品")
-        else:
-            print(f"📋 準備檢查 {len(all_products)} 筆商品...\n")
+            original_url = p['original_url']
+            target_price = p.get('target_price', 0)
+            last_price = p.get('current_price', 99999999)
             
-            for p in all_products:
-                url = p['original_url']
-                platform_name = "未知"
-                
-                if "momo" in url: platform_name = "Momo"
-                elif "pchome" in url: platform_name = "PChome"
-                else: 
-                    print(f"⚠️ 跳過不支援: {url[:20]}...")
-                    continue
+            print(f"正在檢查: {p['product_name']}...")
+            
+            # 2. 判斷平台並爬取
+            current_price = 99999999
+            title = p['product_name']
+            
+            if "momoshop" in original_url:
+                title, current_price = parse_momo(driver, original_url)
+            elif "pchome" in original_url:
+                title, current_price = parse_pchome(driver, original_url)
+            
+            if current_price == 99999999:
+                print("略過: 價格解析失敗")
+                continue
 
-                print(f"🔎 [{platform_name}] {p.get('product_name', '未知')[:10]}...", end=" ")
+            # 3. 處理價格歷史與最低價判斷
+            is_lowest = update_price_history(supabase, p['id'], current_price)
+            
+            # 4. 更新資料庫目前的最新價格
+            supabase.table("products").update({
+                "current_price": current_price, 
+                "product_name": title # 順便更新標題以防變動
+            }).eq("id", p['id']).execute()
+
+            # 5. 觸發通知邏輯
+            # 條件 A: 價格低於或等於使用者設定的目標價
+            # 條件 B: 價格比上次紀錄還低 (降價了)
+            # 條件 C: 價格是歷史新低
+            
+            should_notify = False
+            
+            if target_price and current_price <= target_price:
+                should_notify = True
+            elif current_price < last_price:
+                should_notify = True
+            elif is_lowest: # 即使沒低於目標價，如果是歷史新低也通知
+                should_notify = True
                 
-                try:
-                    driver.get(url)
-                    time.sleep(3) 
-                    
-                    name = "未知"
-                    new_price = 0
-                    
-                    if platform_name == "Momo":
-                        name, new_price = parse_momo(driver)
-                    elif platform_name == "PChome":
-                        name, new_price = parse_pchome(driver)
-                    
-                    if new_price > 0:
-                        print(f"[${new_price}] ✅")
-                        
-                        db.table("products").update({
-                            "current_price": new_price,
-                            "product_name": name,
-                            "original_url": driver.current_url 
-                        }).eq("id", p['id']).execute()
-                        
-                        old_price = p.get('current_price') or 0
-                        target_price = p.get('target_price') or 0
-                        
-                        if (old_price > 0 and new_price < old_price):
-                            msg = f"📉【{platform_name}降價】\n{name}\n\n${old_price} ➡️ ${new_price}\n(省 ${old_price - new_price})"
-                            send_notification(p['user_id'], msg)
-                        elif (old_price != new_price and target_price > 0 and new_price <= target_price):
-                            msg = f"🎯【{platform_name}達標】\n{name}\n\n目前：${new_price}"
-                            send_notification(p['user_id'], msg)
-                    else:
-                        print(f"[抓取失敗] ❌")
-                except Exception as e:
-                    print(f"[Err] ❌")
-    finally:
-        driver.quit()
-        print("\n🏁 任務結束")
+            if should_notify:
+                print(f"==> 觸發通知！現價 ${current_price}")
+                send_notification(title, current_price, original_url, p['user_id'], is_lowest)
+            else:
+                print(f"未達通知標準 (現價 ${current_price} / 目標 ${target_price})")
+                
+            time.sleep(2) # 禮貌性延遲
+            
+        except Exception as e:
+            print(f"處理商品 ID {p.get('id')} 時發生錯誤: {e}")
+            continue
+            
+    driver.quit()
+    print("所有排程執行完畢。")
 
 if __name__ == "__main__":
+    import re # 補上 regex import
     run_updater()
