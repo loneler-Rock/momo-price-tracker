@@ -1,3 +1,4 @@
+print("👋 哈囉！我是程式，我真的有被執行到！")
 import os
 import sys
 import re
@@ -102,3 +103,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
