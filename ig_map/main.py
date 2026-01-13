@@ -2,9 +2,10 @@
 import os
 import sys
 import re
+import json
 import requests
 from urllib.parse import unquote
-from bs4 import BeautifulSoup # 引入強大的網頁解析工具
+from bs4 import BeautifulSoup
 
 # 設定路徑以引用 utils
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -15,7 +16,7 @@ def get_url_content(short_url):
     獲取網址的最終 URL 和 HTML 內容
     """
     try:
-        # 模擬真實瀏覽器，確保 Google 給我們完整的網頁
+        # 模擬真實瀏覽器 User-Agent
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
             "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
@@ -26,77 +27,80 @@ def get_url_content(short_url):
         print(f"❌ 網頁讀取失敗: {e}")
         return short_url, ""
 
-def parse_dms(dms_str):
+def extract_from_json_ld(soup):
     """
-    將度分秒格式 (25°03'56.9"N) 轉換為十進位
+    [V5.0 核心] 從 Google 的 JSON-LD 結構化資料中直接提取座標
+    這是最準確的方法，專門對付餐廳/商家頁面
     """
     try:
-        parts = re.match(r"(\d+)°(\d+)'([\d.]+)\"([NSEW])", dms_str)
-        if parts:
-            degrees = float(parts.group(1))
-            minutes = float(parts.group(2))
-            seconds = float(parts.group(3))
-            direction = parts.group(4)
-            decimal = degrees + minutes/60 + seconds/3600
-            if direction in ['S', 'W']:
-                decimal = -decimal
-            return decimal
+        # 尋找所有 type="application/ld+json" 的腳本
+        scripts = soup.find_all('script', type='application/ld+json')
+        
+        for script in scripts:
+            try:
+                data = json.loads(script.string)
+                
+                # 有時候 data 是一個 list，有時候是 dict
+                if isinstance(data, list):
+                    items = data
+                else:
+                    items = [data]
+                
+                for item in items:
+                    # 確認是否有 @type 和 geo 屬性
+                    if 'geo' in item and '@type' in item:
+                        # 這是我們要的商家資料！
+                        lat = float(item['geo']['latitude'])
+                        lng = float(item['geo']['longitude'])
+                        name = item.get('name', '')
+                        print(f"💎 透過 JSON-LD 完美獲取: {name} ({lat}, {lng})")
+                        return lat, lng, name
+            except:
+                continue
     except Exception as e:
-        print(f"⚠️ DMS 轉換錯誤: {e}")
-    return None
+        print(f"⚠️ JSON-LD 解析微恙 (不影響後續嘗試): {e}")
+        
+    return None, None, None
 
 def extract_data_from_html(html):
     """
-    [V4.0 新功能] 從網頁 HTML 的 meta tag 中挖出座標和店名
-    這是處理手機版連結的關鍵！
+    綜合解析：JSON-LD (首選) -> Meta Tags (次選)
     """
-    lat, lng, name = None, None, None
-    try:
-        soup = BeautifulSoup(html, 'html.parser')
+    soup = BeautifulSoup(html, 'html.parser')
 
-        # 1. 抓取店名 (og:title 通常是 "店名 · 地址")
+    # 1. 第一優先：嘗試解析 JSON-LD (最穩)
+    lat, lng, name = extract_from_json_ld(soup)
+    if lat and lng:
+        return lat, lng, name
+
+    # 2. 第二優先：如果 JSON-LD 失敗，嘗試抓 Meta Tags (og:image / og:title)
+    print("⚠️ JSON-LD 未找到，降級使用 Meta Tags 解析...")
+    
+    # 抓店名
+    if not name:
         og_title = soup.find("meta", property="og:title")
         if og_title and og_title.get("content"):
-            full_title = og_title["content"]
-            # Google 的標題通常是 "店名 · 地址"，我們只取前面
-            name = full_title.split('·')[0].strip()
-            print(f"🕵️ 透過 HTML 抓到店名: {name}")
+            name = og_title["content"].split('·')[0].strip()
+            print(f"🕵️ 透過 Meta Tag 抓到店名: {name}")
 
-        # 2. 抓取座標 (從 og:image 抓取 center 參數)
-        # 範例: https://maps.google.com/.../staticmap?center=24.743,121.730&zoom=...
-        og_image = soup.find("meta", property="og:image")
-        if og_image and og_image.get("content"):
-            image_url = og_image["content"]
-            match = re.search(r'center=(-?\d+\.\d+)%2C(-?\d+\.\d+)', image_url)
-            # 有時候是用逗號分隔，沒編碼
-            if not match:
-                match = re.search(r'center=(-?\d+\.\d+),(-?\d+\.\d+)', image_url)
-                
-            if match:
-                lat, lng = float(match.group(1)), float(match.group(2))
-                print(f"🕵️ 透過 HTML og:image 抓到座標: {lat}, {lng}")
-
-    except Exception as e:
-        print(f"⚠️ HTML 解析失敗: {e}")
-    
-    return lat, lng, name
-
-def extract_name_from_url(url):
-    """
-    從網址中挖掘店名 (備用)
-    """
-    try:
-        decoded_url = unquote(url)
-        match = re.search(r'/place/([^/]+)/', decoded_url)
+    # 抓座標
+    og_image = soup.find("meta", property="og:image")
+    if og_image and og_image.get("content"):
+        image_url = og_image["content"]
+        # 嘗試從圖片網址找 center=lat,lng
+        match = re.search(r'center=(-?\d+\.\d+)%2C(-?\d+\.\d+)', image_url)
+        if not match:
+            match = re.search(r'center=(-?\d+\.\d+),(-?\d+\.\d+)', image_url)
+        
         if match:
-            return match.group(1).replace('+', ' ')
-    except:
-        pass
-    return None
+            lat, lng = float(match.group(1)), float(match.group(2))
+            print(f"🕵️ 透過 og:image 抓到座標: {lat}, {lng}")
+
+    return lat, lng, name
 
 def extract_coordinates_from_url(url):
     """
-    從網址解析經緯度 (備用)
+    最後手段：從網址解析 (備用)
     """
     decoded_url = unquote(url)
     
@@ -107,39 +111,29 @@ def extract_coordinates_from_url(url):
     # Pattern 2: q=lat,long
     match = re.search(r'q=(-?\d+\.\d+),(-?\d+\.\d+)', decoded_url)
     if match: return float(match.group(1)), float(match.group(2))
-        
+    
     # Pattern 3: !3d...!4d...
     match = re.search(r'!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)', decoded_url)
     if match: return float(match.group(1)), float(match.group(2))
-
-    # Pattern 4: DMS 格式
-    try:
-        lat_match = re.search(r'(\d+°\d+\'[\d.]+"[NS])', decoded_url)
-        lng_match = re.search(r'(\d+°\d+\'[\d.]+"[EW])', decoded_url)
-        if lat_match and lng_match:
-            return parse_dms(lat_match.group(1)), parse_dms(lng_match.group(1))
-    except:
-        pass
 
     return None, None
 
 def save_location(supabase, user_id, short_url):
     print(f"🔍 正在解析: {short_url} ...")
     
-    # 1. 取得最終網址與網頁內容 (這是 V4.0 的核心)
+    # 1. 取得網頁內容
     final_url, html_content = get_url_content(short_url)
     print(f"➡️ 最終網址: {final_url[:80]}...") 
     
-    # 2. 先嘗試從 HTML (爬蟲) 獲取資料 -> 這是最準的
-    lat, lng, html_name = extract_data_from_html(html_content)
+    # 2. 爬蟲解析 (JSON-LD > Meta Tags)
+    lat, lng, shop_name = extract_data_from_html(html_content)
     
-    # 3. 如果 HTML 沒抓到，再用舊方法從 URL 算
+    # 3. 如果爬蟲全失敗，最後試試看網址有沒有
     if not lat or not lng:
-        print("⚠️ HTML 內無座標，嘗試從網址解析...")
+        print("⚠️ HTML 解析無座標，最後嘗試 URL 分析...")
         lat, lng = extract_coordinates_from_url(final_url)
-        
-    # 店名邏輯：優先用 HTML 抓到的中文名，沒有才用網址解碼
-    shop_name = html_name if html_name else extract_name_from_url(final_url)
+    
+    # 確保有店名
     if not shop_name:
         shop_name = "未命名地點"
 
@@ -163,12 +157,12 @@ def save_location(supabase, user_id, short_url):
         except Exception as e:
             print(f"❌ 資料庫寫入失敗: {e}")
     else:
-        print("⚠️ 無法解析出座標 (URL與HTML皆失敗)。")
+        print("⚠️ 全面解析失敗：無法從該連結獲取座標。")
     
     return False
 
 def main():
-    print("🚀 IG 美食地圖解析器 V4.0 (爬蟲強攻版) 啟動...")
+    print("🚀 IG 美食地圖解析器 V5.0 (結構化資料版) 啟動...")
     
     if len(sys.argv) > 2:
         target_url = sys.argv[1]
