@@ -6,13 +6,13 @@ import requests
 import time
 from urllib.parse import unquote
 
-# 設定路徑以引用 utils
+# 設定路徑以引用 utils (確保能找到上一層的 supabase_client)
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.supabase_client import init_supabase
 
 def expand_url(short_url):
     """
-    將短網址 (如 https://maps.app.goo.gl/...) 還原為長網址
+    將短網址 (如 http://googleusercontent.com/...) 還原為長網址
     """
     try:
         # allow_redirects=True 會自動幫我們跳轉到最終網址
@@ -27,9 +27,6 @@ def extract_coordinates(url):
     核心邏輯：使用 Regex 從 Google Maps 網址中暴力解析經緯度
     不使用 Google API (省錢策略)
     """
-    # 網址通常包含 @緯度,經度,縮放
-    # 例如: https://www.google.com/maps/place/.../@25.0339639,121.5644722,17z/...
-    
     # Pattern 1: 尋找 @lat,long
     match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', url)
     if match:
@@ -86,33 +83,28 @@ def save_location(supabase, user_id, url, name="未命名地點"):
 
 def main():
     print("🚀 IG 美食地圖解析器啟動...")
-    supabase = init_supabase()
     
-    # ==========================================
-    # 模擬測試區 (因為我們還沒接 Webhook)
-    # ==========================================
-    # 這裡我們放幾個假的測試資料，模擬使用者從 LINE 傳來的連結
-    
-    test_inputs = [
-        # 測試 1: Google Maps 短網址 (假設這是 User 傳的)
-        {
-            "user_id": "TEST_USER_001",
-            "url": "https://maps.app.goo.gl/KkX9Jz8b9Jz8b9Jz8" # 這是範例，如果失效是正常的
-        },
-        # 測試 2: 已知的長網址 (台北 101)
-        {
-            "user_id": "TEST_USER_001", 
-            "url": "https://www.google.com/maps/place/Taipei+101/@25.0339639,121.5644722,17z/data=!3m1!4b1!4m6!3m5!1s0x3442abb6da9c9e1f:0x1206a061c55743f4!8m2!3d25.0339639!4d121.5644722!16s%2Fm%2F02_6w?entry=ttu"
-        }
-    ]
-
-    # 如果有從 command line 傳入參數 (未來給 GitHub Actions 用)
-    # 這裡可以擴充接收 sys.argv
-    
-    for item in test_inputs:
-        print(f"\n--- 處理任務 ---")
-        # 注意: 上面的短網址範例是假的，可能會解析失敗，我們主要測下面那個長網址
-        save_location(supabase, item["user_id"], item["url"])
+    # 接收外部參數 (這是為了讓 GitHub Actions 傳資料進來)
+    # sys.argv[0] 是檔名, [1] 是 URL, [2] 是 User ID
+    if len(sys.argv) > 2:
+        target_url = sys.argv[1]
+        user_id = sys.argv[2]
+        
+        print(f"收到指令！\n使用者: {user_id}\n網址: {target_url}")
+        
+        try:
+            supabase = init_supabase()
+            save_location(supabase, user_id, target_url)
+        except Exception as e:
+            print(f"❌ 執行發生錯誤: {e}")
+            sys.exit(1) # 回傳錯誤代碼讓 GitHub Actions 知道失敗了
+            
+    else:
+        # 如果沒有傳參數，就跑測試模式 (方便你在本地端 Debug)
+        print("⚠️ 未偵測到外部參數，進入「本地測試模式」...")
+        
+        # 這裡可以放你想測的假資料
+        print("請使用 GitHub Actions 輸入參數來測試真實情境。")
 
 if __name__ == "__main__":
     main()
