@@ -147,3 +147,54 @@ def run_updater():
     for p in products:
         try:
             original_url = p['original_url']
+            target_price = p.get('target_price', 0)
+            last_price = p.get('current_price', 99999999)
+            
+            print(f"正在檢查: {p['product_name']}...")
+            
+            current_price = 99999999
+            title = p['product_name']
+            
+            if "momoshop" in original_url:
+                title, current_price = parse_momo(driver, original_url)
+            elif "pchome" in original_url:
+                title, current_price = parse_pchome(driver, original_url)
+            
+            if current_price == 99999999:
+                print("略過: 價格解析失敗")
+                continue
+
+            is_lowest = update_price_history(supabase, p['id'], current_price)
+            
+            supabase.table("products").update({
+                "current_price": current_price, 
+                "product_name": title 
+            }).eq("id", p['id']).execute()
+
+            should_notify = False
+            
+            if target_price and current_price <= target_price:
+                should_notify = True
+            elif current_price < last_price:
+                should_notify = True
+            elif is_lowest:
+                should_notify = True
+                
+            if should_notify:
+                print(f"==> 觸發通知！現價 ${current_price}")
+                send_notification(title, current_price, original_url, p['user_id'], is_lowest)
+            else:
+                print(f"未達通知標準 (現價 ${current_price})")
+                
+            time.sleep(2)
+            
+        except Exception as e:
+            print(f"處理商品 ID {p.get('id')} 時發生錯誤: {e}")
+            continue
+            
+    driver.quit()
+    print("所有排程執行完畢。")
+
+if __name__ == "__main__":
+    run_updater()
+# End of File
