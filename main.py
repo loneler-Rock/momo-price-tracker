@@ -1,200 +1,118 @@
-
+# 檔案位置: ig_map/main.py
 import os
-import time
-import requests
-import urllib.parse
+import sys
 import re
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-from supabase import create_client
+import requests
+import time
+from urllib.parse import unquote
 
-# ==========================================
-# 系統設定區
-# ==========================================
-SUPABASE_URL = "https://eovkimfqgoggxbkvkjxg.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVvdmtpbWZxZ29nZ3hia3ZranhnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc3NjI1NzksImV4cCI6MjA4MzMzODU3OX0.akX_HaZQwRh53KJ-ULuc5Syf2ypjhaYOg7DfWhYs8EY"
-MAKE_WEBHOOK_URL = "https://hook.eu1.make.com/iqfx87wola6yp35c3ly7mqvugycxwlfx"
+# 設定路徑以引用 utils
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from utils.supabase_client import init_supabase
 
-# 通路王 (iChannels) 會員 ID
-ICHANNELS_ID = "af000148084"
-
-# ==========================================
-# 核心功能函式
-# ==========================================
-
-def get_supabase():
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
-
-def setup_driver():
-    chrome_options = Options()
-    chrome_options.add_argument('--headless') 
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
-    
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=chrome_options)
-
-def generate_affiliate_link(original_url):
+def expand_url(short_url):
     """
-    將原始商品網址轉換為通路王 (iChannels) 分潤連結
-    修正：僅針對 Momo 轉換，PChome 暫時回傳原網址以免連結失效
+    將短網址 (如 https://maps.app.goo.gl/...) 還原為長網址
     """
-    # 只針對 Momo 進行轉換
-    if "momoshop.com.tw" in original_url:
-        encoded_url = urllib.parse.quote(original_url)
-        return f"http://www.ichannels.com.tw/bbs.php?member={ICHANNELS_ID}&url={encoded_url}"
-    
-    # PChome (因無合作權限) 直接回傳原網址，確保連結可用
-    return original_url
-
-def update_price_history(supabase, product_id, price):
     try:
-        supabase.table("price_history").insert({
-            "product_id": product_id,
-            "price": price
-        }).execute()
+        # allow_redirects=True 會自動幫我們跳轉到最終網址
+        response = requests.get(short_url, allow_redirects=True, timeout=10)
+        return response.url
     except Exception as e:
-        print(f"寫入歷史價格失敗: {e}")
+        print(f"❌ 網址還原失敗: {e}")
+        return short_url
 
-    try:
-        data = supabase.table("products").select("lowest_price").eq("id", product_id).execute()
-        current_lowest = data.data[0].get("lowest_price")
+def extract_coordinates(url):
+    """
+    核心邏輯：使用 Regex 從 Google Maps 網址中暴力解析經緯度
+    不使用 Google API (省錢策略)
+    """
+    # 網址通常包含 @緯度,經度,縮放
+    # 例如: https://www.google.com/maps/place/.../@25.0339639,121.5644722,17z/...
+    
+    # Pattern 1: 尋找 @lat,long
+    match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', url)
+    if match:
+        return float(match.group(1)), float(match.group(2))
         
-        if current_lowest is None or price < float(current_lowest):
-            supabase.table("products").update({"lowest_price": price}).eq("id", product_id).execute()
-            return True 
-    except Exception as e:
-        print(f"檢查歷史低價失敗: {e}")
+    # Pattern 2: 尋找 query param ?q=lat,long
+    match = re.search(r'q=(-?\d+\.\d+),(-?\d+\.\d+)', url)
+    if match:
+        return float(match.group(1)), float(match.group(2))
         
-    return False 
+    # Pattern 3: 尋找 !3dlat!4dlong (Google Maps 內嵌代碼格式)
+    match = re.search(r'!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)', url)
+    if match:
+        return float(match.group(1)), float(match.group(2))
 
-def parse_momo(driver, url):
-    driver.get(url)
-    time.sleep(3)
-    try:
-        title = driver.title.split("-")[0].strip()
-        price_text = ""
+    return None, None
+
+def save_location(supabase, user_id, url, name="未命名地點"):
+    """
+    將解析結果存入 Supabase
+    """
+    print(f"🔍 正在解析: {url} ...")
+    
+    # 1. 如果是短網址，先還原
+    final_url = expand_url(url)
+    print(f"➡️ 最終網址: {final_url[:60]}...") # 只印前60字避免太長
+    
+    # 2. 解析座標
+    lat, lng = extract_coordinates(final_url)
+    
+    if lat and lng:
+        print(f"✅ 抓到座標: 緯度 {lat}, 經度 {lng}")
+        
+        # 3. 寫入資料庫
+        # 注意: 我們不需要手動寫 geom，SQL Trigger 會自動幫我們算
+        data = {
+            "user_id": user_id,
+            "original_url": url,
+            "name": name,
+            "latitude": lat,
+            "longitude": lng
+        }
+        
         try:
-            price_text = driver.find_element("css selector", ".prdPrice").text
-        except:
-            try:
-                price_text = driver.find_element("css selector", "#pKwdPrice").text
-            except:
-                price_text = "0"
-        price = int(re.sub(r"[^\d]", "", price_text))
-        return title, price
-    except Exception as e:
-        print(f"Momo 解析失敗: {e}")
-        return "Unknown Product", 99999999
-
-def parse_pchome(driver, url):
-    driver.get(url)
-    time.sleep(3)
-    try:
-        title = driver.title.split("-")[0].strip()
-        price_text = ""
-        try:
-            price_text = driver.find_element("css selector", ".o-prodPrice__price").text
-        except:
-            try:
-                price_text = driver.find_element("css selector", "#PriceTotal").text
-            except:
-                price_text = "0"
-        price = int(re.sub(r"[^\d]", "", price_text))
-        return title, price
-    except Exception as e:
-        print(f"PChome 解析失敗: {e}")
-        return "Unknown Product", 99999999
-
-def send_notification(product_name, price, url, user_id, is_lowest_price):
-    # 這裡會呼叫修正後的函式，Momo 變更長，PChome 保持原樣
-    affiliate_url = generate_affiliate_link(url)
-    
-    status_tag = "🔥 歷史新低價！" if is_lowest_price else "📉 降價通知"
-    
-    message = (
-        f"{status_tag}\n"
-        f"商品：{product_name}\n"
-        f"金額：${price:,}\n"
-        f"------------------\n"
-        f"點此購買：\n{affiliate_url}"
-    )
-    
-    payload = {
-        "message": message,
-        "to": user_id
-    }
-    
-    try:
-        requests.post(MAKE_WEBHOOK_URL, json=payload)
-        print(f"通知已發送: {product_name}")
-    except Exception as e:
-        print(f"Webhook 發送失敗: {e}")
-
-def run_updater():
-    print("啟動比價爬蟲 V10.2 (安全修正版)...")
-    supabase = get_supabase()
-    driver = setup_driver()
-    
-    response = supabase.table("products").select("*").eq("is_active", True).execute()
-    products = response.data
-    
-    print(f"共發現 {len(products)} 個監控商品")
-
-    for p in products:
-        try:
-            original_url = p['original_url']
-            target_price = p.get('target_price', 0)
-            last_price = p.get('current_price', 99999999)
-            
-            print(f"正在檢查: {p['product_name']}...")
-            
-            current_price = 99999999
-            title = p['product_name']
-            
-            if "momoshop" in original_url:
-                title, current_price = parse_momo(driver, original_url)
-            elif "pchome" in original_url:
-                title, current_price = parse_pchome(driver, original_url)
-            
-            if current_price == 99999999:
-                print("略過: 價格解析失敗")
-                continue
-
-            is_lowest = update_price_history(supabase, p['id'], current_price)
-            
-            supabase.table("products").update({
-                "current_price": current_price, 
-                "product_name": title 
-            }).eq("id", p['id']).execute()
-
-            should_notify = False
-            
-            if target_price and current_price <= target_price:
-                should_notify = True
-            elif current_price < last_price:
-                should_notify = True
-            elif is_lowest:
-                should_notify = True
-                
-            if should_notify:
-                print(f"==> 觸發通知！現價 ${current_price}")
-                send_notification(title, current_price, original_url, p['user_id'], is_lowest)
-            else:
-                print(f"未達通知標準 (現價 ${current_price})")
-                
-            time.sleep(2)
-            
+            supabase.table("ig_food_map").insert(data).execute()
+            print("🎉 成功儲存至 Supabase!")
+            return True
         except Exception as e:
-            print(f"處理商品 ID {p.get('id')} 時發生錯誤: {e}")
-            continue
-            
-    driver.quit()
-    print("所有排程執行完畢。")
+            print(f"❌ 資料庫寫入失敗: {e}")
+    else:
+        print("⚠️ 無法解析出座標，可能是網址格式不支援。")
+    
+    return False
+
+def main():
+    print("🚀 IG 美食地圖解析器啟動...")
+    supabase = init_supabase()
+    
+    # ==========================================
+    # 模擬測試區 (因為我們還沒接 Webhook)
+    # ==========================================
+    # 這裡我們放幾個假的測試資料，模擬使用者從 LINE 傳來的連結
+    
+    test_inputs = [
+        # 測試 1: Google Maps 短網址 (假設這是 User 傳的)
+        {
+            "user_id": "TEST_USER_001",
+            "url": "https://maps.app.goo.gl/KkX9Jz8b9Jz8b9Jz8" # 這是範例，如果失效是正常的
+        },
+        # 測試 2: 已知的長網址 (台北 101)
+        {
+            "user_id": "TEST_USER_001", 
+            "url": "https://www.google.com/maps/place/Taipei+101/@25.0339639,121.5644722,17z/data=!3m1!4b1!4m6!3m5!1s0x3442abb6da9c9e1f:0x1206a061c55743f4!8m2!3d25.0339639!4d121.5644722!16s%2Fm%2F02_6w?entry=ttu"
+        }
+    ]
+
+    # 如果有從 command line 傳入參數 (未來給 GitHub Actions 用)
+    # 這裡可以擴充接收 sys.argv
+    
+    for item in test_inputs:
+        print(f"\n--- 處理任務 ---")
+        # 注意: 上面的短網址範例是假的，可能會解析失敗，我們主要測下面那個長網址
+        save_location(supabase, item["user_id"], item["url"])
 
 if __name__ == "__main__":
-    run_updater()
-# End of File
+    main()
