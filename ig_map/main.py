@@ -3,7 +3,6 @@ import os
 import sys
 import re
 import requests
-import time
 from urllib.parse import unquote
 
 # 設定路徑以引用 utils
@@ -15,7 +14,6 @@ def expand_url(short_url):
     將短網址還原為長網址
     """
     try:
-        # 模擬瀏覽器 User Agent，避免被 Google 擋
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
@@ -25,69 +23,98 @@ def expand_url(short_url):
         print(f"❌ 網址還原失敗: {e}")
         return short_url
 
-def extract_name_from_url(url):
+def parse_dms(dms_str):
     """
-    [V2.0 新功能] 從 Google Maps 網址中挖掘店名
-    網址格式通常為: /maps/place/店名/@...
+    將度分秒格式 (25°03'56.9"N) 轉換為十進位 (25.0658)
     """
     try:
-        # 尋找 /place/ 後面的文字，直到遇到 / 為止
-        match = re.search(r'/place/([^/]+)/', url)
+        # 使用 Regex 拆解 度、分、秒、方向
+        parts = re.match(r"(\d+)°(\d+)'([\d.]+)\"([NSEW])", dms_str)
+        if parts:
+            degrees = float(parts.group(1))
+            minutes = float(parts.group(2))
+            seconds = float(parts.group(3))
+            direction = parts.group(4)
+            
+            decimal = degrees + minutes/60 + seconds/3600
+            
+            if direction in ['S', 'W']:
+                decimal = -decimal
+            return decimal
+    except Exception as e:
+        print(f"⚠️ DMS 轉換錯誤: {e}")
+    return None
+
+def extract_name_from_url(url):
+    """
+    從網址中挖掘店名
+    """
+    try:
+        decoded_url = unquote(url)
+        match = re.search(r'/place/([^/]+)/', decoded_url)
         if match:
-            # 網址通常是編碼過的 (例如 %E5%8F%B0...)，需要 unquote 解碼成中文
-            raw_name = match.group(1)
-            decoded_name = unquote(raw_name)
-            # 把 + 號換成空白 (Google 用 + 代表空白)
-            clean_name = decoded_name.replace('+', ' ')
-            return clean_name
+            return match.group(1).replace('+', ' ')
     except Exception as e:
         print(f"⚠️ 解析店名失敗: {e}")
     
-    return "未命名地點" # 如果真的找不到，才用這個
+    return "未命名地點"
 
 def extract_coordinates(url):
     """
-    從網址解析經緯度
+    從網址解析經緯度 (支援十進位與度分秒)
     """
-    # Pattern 1: @lat,long
-    match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', url)
+    # 關鍵步驟：先將網址解碼 (把 %C2%B0 變回 °)
+    decoded_url = unquote(url)
+    print(f"🔓 解碼後網址: {decoded_url[:100]}...")
+
+    # Pattern 1: 十進位 @lat,long
+    match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', decoded_url)
     if match:
         return float(match.group(1)), float(match.group(2))
         
-    # Pattern 2: ?q=lat,long
-    match = re.search(r'q=(-?\d+\.\d+),(-?\d+\.\d+)', url)
+    # Pattern 2: 查詢參數 q=lat,long (十進位)
+    match = re.search(r'q=(-?\d+\.\d+),(-?\d+\.\d+)', decoded_url)
     if match:
         return float(match.group(1)), float(match.group(2))
         
-    # Pattern 3: !3d...!4d...
-    match = re.search(r'!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)', url)
+    # Pattern 3: Google 內嵌格式 !3d...!4d...
+    match = re.search(r'!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)', decoded_url)
     if match:
         return float(match.group(1)), float(match.group(2))
+
+    # Pattern 4: 度分秒格式 (DMS) q=25°03'56.9"N 121°30'31.4"E
+    # 這是為了處理你剛剛遇到的那個狀況
+    try:
+        lat_dms_match = re.search(r'(\d+°\d+\'[\d.]+"[NS])', decoded_url)
+        lng_dms_match = re.search(r'(\d+°\d+\'[\d.]+"[EW])', decoded_url)
+        
+        if lat_dms_match and lng_dms_match:
+            lat = parse_dms(lat_dms_match.group(1))
+            lng = parse_dms(lng_dms_match.group(1))
+            return lat, lng
+    except Exception as e:
+        print(f"⚠️ DMS 解析失敗: {e}")
 
     return None, None
 
 def save_location(supabase, user_id, url):
     print(f"🔍 正在解析: {url} ...")
     
-    # 1. 還原網址
     final_url = expand_url(url)
     print(f"➡️ 最終網址: {final_url[:100]}...") 
     
-    # 2. [新功能] 解析店名
     shop_name = extract_name_from_url(final_url)
     print(f"🏷️ 偵測到店名: {shop_name}")
     
-    # 3. 解析座標
     lat, lng = extract_coordinates(final_url)
     
     if lat and lng:
         print(f"✅ 抓到座標: 緯度 {lat}, 經度 {lng}")
         
-        # 4. 寫入資料庫
         data = {
             "user_id": user_id,
             "original_url": url,
-            "name": shop_name,  # 這裡現在會填入真正的店名了！
+            "name": shop_name,
             "latitude": lat,
             "longitude": lng
         }
@@ -104,9 +131,8 @@ def save_location(supabase, user_id, url):
     return False
 
 def main():
-    print("🚀 IG 美食地圖解析器 V2.0 (含店名解析) 啟動...")
+    print("🚀 IG 美食地圖解析器 V3.0 (含度分秒解析) 啟動...")
     
-    # 接收外部參數
     if len(sys.argv) > 2:
         target_url = sys.argv[1]
         user_id = sys.argv[2]
@@ -119,9 +145,8 @@ def main():
         except Exception as e:
             print(f"❌ 執行發生錯誤: {e}")
             sys.exit(1) 
-            
     else:
-        print("⚠️ 無法執行：缺少參數。請透過 GitHub Actions 執行。")
+        print("⚠️ 缺少參數，請透過 GitHub Actions 執行。")
 
 if __name__ == "__main__":
     main()
