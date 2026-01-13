@@ -1,0 +1,37 @@
+name: IG Map Scraper
+
+on:
+  workflow_dispatch:
+    # 這裡定義了「輸入欄位」，讓 Make.com 可以傳資料進來
+    inputs:
+      url:
+        description: 'Google Maps/IG URL'
+        required: true
+      user_id:
+        description: 'Line User ID'
+        required: true
+
+jobs:
+  parse-location:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Run Map Parser
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        PYTHONPATH: ${{ github.workspace }}
+      # 這裡是關鍵：把 GitHub 接收到的 inputs 傳給 Python
+      run: python ig_map/main.py "${{ inputs.url }}" "${{ inputs.user_id }}"
